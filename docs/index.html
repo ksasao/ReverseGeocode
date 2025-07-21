@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日本住所検索マップ</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Hiragino Kaku Gothic Pro', 'ヒラギノ角ゴ Pro W3', Meiryo, sans-serif;
+        }
+        
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+        
+        .info-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            max-width: 320px;
+        }
+        
+        .info-panel h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 18px;
+        }
+        
+        .info-panel p {
+            margin: 5px 0;
+            font-size: 14px;
+        }
+        
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2000;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        
+        .loading .progress {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .popup-content {
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .popup-content .address {
+            font-weight: bold;
+            color: #2c5aa0;
+            margin-bottom: 5px;
+        }
+        
+        .popup-content .kana {
+            color: #666;
+            font-size: 12px;
+        }
+        
+        .popup-content .coords {
+            color: #999;
+            font-size: 11px;
+            margin-top: 5px;
+            border-top: 1px solid #eee;
+            padding-top: 5px;
+        }
+        
+        .search-radius {
+            color: #888;
+            font-size: 11px;
+            font-style: italic;
+        }
+        
+        .performance-info {
+            background: #f0f8ff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 8px;
+            margin-top: 8px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="loading" id="loading">
+        <div>住所データを読み込み中...</div>
+        <div class="progress" id="progress"></div>
+    </div>
+    
+    <div class="info-panel">
+        <h3>🗾 日本住所検索マップ</h3>
+        <p>地図上をクリックすると、その場所の住所が表示されます</p>
+        <p class="search-radius">※ クリック地点から5km以内の最寄り住所を検索</p>
+        <div class="performance-info" id="performance" style="display: none;">
+            <div>データ件数: <span id="dataCount">-</span>件</div>
+            <div>kd木構築時間: <span id="buildTime">-</span>ms</div>
+            <div>検索時間: <span id="searchTime">-</span>ms</div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        let map;
+        let addressData = [];
+        let kdTree = null;
+        
+        // kd木のノード
+        class KDNode {
+            constructor(point, axis, left = null, right = null) {
+                this.point = point;
+                this.axis = axis; // 0: 緯度, 1: 経度
+                this.left = left;
+                this.right = right;
+            }
+        }
+        
+        // kd木の実装
+        class KDTree {
+            constructor(points) {
+                this.root = this.buildTree(points, 0);
+            }
+            
+            buildTree(points, depth) {
+                if (points.length === 0) return null;
+                
+                const axis = depth % 2; // 0: lat, 1: lon
+                
+                // 現在の軸でソート
+                points.sort((a, b) => {
+                    return axis === 0 ? a.lat - b.lat : a.lon - b.lon;
+                });
+                
+                const median = Math.floor(points.length / 2);
+                const node = new KDNode(points[median], axis);
+                
+                node.left = this.buildTree(points.slice(0, median), depth + 1);
+                node.right = this.buildTree(points.slice(median + 1), depth + 1);
+                
+                return node;
+            }
+            
+            // 最近傍検索
+            findNearest(targetLat, targetLon, maxDistance = 5000) {
+                let best = null;
+                let bestDistance = Infinity;
+                
+                const search = (node, depth = 0) => {
+                    if (!node) return;
+                    
+                    // 現在のノードとの距離を計算
+                    const distance = this.calculateDistance(targetLat, targetLon, node.point.lat, node.point.lon);
+                    
+                    if (distance <= maxDistance && distance < bestDistance) {
+                        bestDistance = distance;
+                        best = { ...node.point, distance };
+                    }
+                    
+                    const axis = depth % 2;
+                    const targetValue = axis === 0 ? targetLat : targetLon;
+                    const nodeValue = axis === 0 ? node.point.lat : node.point.lon;
+                    
+                    // どちらの子を先に探索するか決める
+                    const primary = targetValue < nodeValue ? node.left : node.right;
+                    const secondary = targetValue < nodeValue ? node.right : node.left;
+                    
+                    // 主要側を探索
+                    search(primary, depth + 1);
+                    
+                    // 分割線との距離を計算（簡単な近似）
+                    const splitDistance = Math.abs(targetValue - nodeValue) * 111000; // 大まかな度→メートル変換
+                    
+                    // もう一方も探索する必要があるかチェック
+                    if (splitDistance < bestDistance || bestDistance > maxDistance) {
+                        search(secondary, depth + 1);
+                    }
+                };
+                
+                search(this.root);
+                return best;
+            }
+            
+            // 2点間の距離を計算（ハーバーサイン公式）
+            calculateDistance(lat1, lon1, lat2, lon2) {
+                const R = 6371000; // 地球の半径（メートル）
+                const φ1 = lat1 * Math.PI / 180;
+                const φ2 = lat2 * Math.PI / 180;
+                const Δφ = (lat2 - lat1) * Math.PI / 180;
+                const Δλ = (lon2 - lon1) * Math.PI / 180;
+                
+                const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                         Math.cos(φ1) * Math.cos(φ2) *
+                         Math.sin(Δλ/2) * Math.sin(Δλ/2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                
+                return R * c;
+            }
+        }
+        
+        // 地図を初期化
+        function initMap() {
+            map = L.map('map').setView([36.2048, 138.2529], 6); // 日本中央部
+            
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+            
+            // 地図クリックイベント
+            map.on('click', onMapClick);
+        }
+        
+        // CSVデータを読み込み
+        async function loadAddressData() {
+            try {
+                document.getElementById('progress').textContent = 'CSVファイルをダウンロード中...';
+                
+                const response = await fetch('merged.csv');
+                const csvText = await response.text();
+                
+                document.getElementById('progress').textContent = 'CSVデータを解析中...';
+                await new Promise(resolve => setTimeout(resolve, 10)); // UI更新のための短い待機
+                
+                parseCSV(csvText);
+                
+                document.getElementById('progress').textContent = 'kd木を構築中...';
+                await new Promise(resolve => setTimeout(resolve, 10)); // UI更新のための短い待機
+                
+                buildKDTree();
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('performance').style.display = 'block';
+                
+            } catch (error) {
+                console.error('CSVファイルの読み込みに失敗しました:', error);
+                document.getElementById('loading').innerHTML = 
+                    '<div style="color: red;">CSVファイル「merged.csv」が見つかりません<br>同じフォルダに配置してください</div>';
+            }
+        }
+        
+        // CSVを解析
+        function parseCSV(csvText) {
+            const lines = csvText.trim().split('\n');
+            const headers = lines[0].split(',');
+            
+            // ヘッダーのインデックスを取得
+            const lgCodeIndex = headers.indexOf('lg_code');
+            const machiazeIdIndex = headers.indexOf('machiaza_id');
+            const latIndex = headers.indexOf('rep_lat');
+            const lonIndex = headers.indexOf('rep_lon');
+            const prefIndex = headers.indexOf('pref');
+            const prefKanaIndex = headers.indexOf('pref_kana');
+            const cityIndex = headers.indexOf('city');
+            const cityKanaIndex = headers.indexOf('city_kana');
+            const wardIndex = headers.indexOf('ward');
+            const wardKanaIndex = headers.indexOf('ward_kana');
+            const oazaChoIndex = headers.indexOf('oaza_cho');
+            const oazaChoKanaIndex = headers.indexOf('oaza_cho_kana');
+            const chomeIndex = headers.indexOf('chome');
+            const chomeKanaIndex = headers.indexOf('chome_kana');
+            const koazaIndex = headers.indexOf('koaza');
+            
+            // koaza_kanaは18番目のインデックス（19列目）を使用
+            const koazaKanaIndex = 18;
+            
+            addressData = [];
+            
+            // データ行を解析
+            for (let i = 1; i < lines.length; i++) {
+                const columns = lines[i].split(',');
+                
+                if (columns.length > 0) {
+                    const lat = parseFloat(columns[latIndex]);
+                    const lon = parseFloat(columns[lonIndex]);
+                    
+                    if (!isNaN(lat) && !isNaN(lon)) {
+                        const record = {
+                            lg_code: columns[lgCodeIndex] || '',
+                            machiaza_id: columns[machiazeIdIndex] || '',
+                            lat: lat,
+                            lon: lon,
+                            pref: columns[prefIndex] || '',
+                            pref_kana: columns[prefKanaIndex] || '',
+                            city: columns[cityIndex] || '',
+                            city_kana: columns[cityKanaIndex] || '',
+                            ward: columns[wardIndex] || '',
+                            ward_kana: columns[wardKanaIndex] || '',
+                            oaza_cho: columns[oazaChoIndex] || '',
+                            oaza_cho_kana: columns[oazaChoKanaIndex] || '',
+                            chome: columns[chomeIndex] || '',
+                            chome_kana: columns[chomeKanaIndex] || '',
+                            koaza: columns[koazaIndex] || '',
+                            koaza_kana: koazaKanaIndex < columns.length ? columns[koazaKanaIndex] || '' : ''
+                        };
+                        
+                        addressData.push(record);
+                    }
+                }
+            }
+            
+            console.log(`住所データ ${addressData.length.toLocaleString()} 件を読み込みました`);
+            document.getElementById('dataCount').textContent = addressData.length.toLocaleString();
+        }
+        
+        // kd木を構築
+        function buildKDTree() {
+            const startTime = performance.now();
+            
+            kdTree = new KDTree(addressData);
+            
+            const endTime = performance.now();
+            const buildTime = Math.round(endTime - startTime);
+            
+            console.log(`kd木構築完了: ${buildTime}ms`);
+            document.getElementById('buildTime').textContent = buildTime;
+        }
+        
+        // 住所文字列を構築
+        function buildAddressString(record) {
+            let address = record.pref;
+            if (record.city) address += record.city;
+            if (record.ward) address += record.ward;
+            if (record.oaza_cho) address += record.oaza_cho;
+            if (record.chome) address += record.chome;
+            if (record.koaza) address += record.koaza;
+            return address;
+        }
+        
+        // カナ住所文字列を構築
+        function buildAddressKanaString(record) {
+            let kana = record.pref_kana || '';
+            if (record.city_kana) kana += record.city_kana;
+            if (record.ward_kana) kana += record.ward_kana;
+            if (record.oaza_cho_kana) kana += record.oaza_cho_kana;
+            if (record.chome_kana) kana += record.chome_kana;
+            if (record.koaza_kana) kana += record.koaza_kana;
+            
+            return kana;
+        }
+        
+        // 地図クリック時の処理
+        function onMapClick(e) {
+            const clickLat = e.latlng.lat;
+            const clickLon = e.latlng.lng;
+            
+            // kd木を使用した高速検索
+            const startTime = performance.now();
+            const nearest = kdTree.findNearest(clickLat, clickLon);
+            const endTime = performance.now();
+            const searchTime = Math.round((endTime - startTime) * 1000) / 1000; // 小数点3桁
+            
+            document.getElementById('searchTime').textContent = searchTime;
+            console.log(`検索時間: ${searchTime}ms`);
+            
+            if (nearest) {
+                const address = buildAddressString(nearest);
+                const kana = buildAddressKanaString(nearest);
+                
+                const popupContent = `
+                    <div class="popup-content">
+                        <div class="address">${address}</div>
+                        <div class="kana">${kana}</div>
+                        <div class="coords">
+                            クリック地点: ${clickLat.toFixed(6)}, ${clickLon.toFixed(6)}<br>
+                            住所地点: ${nearest.lat.toFixed(6)}, ${nearest.lon.toFixed(6)}<br>
+                            距離: ${nearest.distance.toFixed(0)}m<br>
+                            検索時間: ${searchTime}ms
+                        </div>
+                    </div>
+                `;
+                
+                L.popup()
+                    .setLatLng(e.latlng)
+                    .setContent(popupContent)
+                    .openOn(map);
+                
+                // 住所の実際の位置にマーカーを一時的に表示
+                const marker = L.marker([nearest.lat, nearest.lon], {
+                    icon: L.icon({
+                        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+                        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                        iconSize: [25, 41],
+                        iconAnchor: [12, 41],
+                        popupAnchor: [1, -34],
+                        shadowSize: [41, 41]
+                    })
+                }).addTo(map);
+                
+                // 3秒後にマーカーを削除
+                setTimeout(() => {
+                    map.removeLayer(marker);
+                }, 3000);
+                
+            } else {
+                L.popup()
+                    .setLatLng(e.latlng)
+                    .setContent(`<div class="popup-content">この地点の近くに住所データが見つかりませんでした<br>検索時間: ${searchTime}ms</div>`)
+                    .openOn(map);
+            }
+        }
+        
+        // 初期化
+        document.addEventListener('DOMContentLoaded', function() {
+            initMap();
+            loadAddressData();
+        });
+    </script>
+</body>
+</html>
