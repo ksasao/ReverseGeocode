@@ -915,8 +915,8 @@
                     }
                     
                     if (isPredicted && predictionInfo) {
-                        coordsText += `移動速度: ${predictionInfo.speed.toFixed(1)}m/s<br>`;
-                        coordsText += `更新から: ${(predictionInfo.timeSinceUpdate / 1000).toFixed(1)}秒`;
+                        coordsText += `移動速度: ${predictionInfo.speed.toFixed(1)}m/s`;
+                        // coordsText += `更新から: ${(predictionInfo.timeSinceUpdate / 1000).toFixed(1)}秒`;
                     }
                     
                     coordsDiv.innerHTML = coordsText;
