@@ -19,9 +19,9 @@
         /* 現在位置表示パネル */
         .location-panel {
             position: fixed;
-            top: 70px;
-            left: 10px;
-            width: calc(100vw - 360px);
+            top: 10px;
+            left: 70px;
+            width: calc(100vw - 450px);
             max-width: 500px;
             z-index: 1000;
             background: white;
@@ -64,6 +64,7 @@
         
         .location-toggle.disabled {
             background: #999;
+            color: white;
         }
         
         .location-toggle.disabled:hover {
@@ -106,22 +107,23 @@
         .info-panel {
             position: fixed;
             top: 10px;
-            right: 10px;
+            right: 5px;
             z-index: 1000;
             background: white;
-            padding: 15px;
+            padding: 12px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-            width: 300px;
-            max-width: calc(100vw - 30px);
+            width: 280px;
+            max-width: calc(100vw - 25px);
             -webkit-transform: translateZ(0);
             transform: translateZ(0);
             transition: all 0.3s ease;
         }
         
         .info-panel.collapsed {
-            width: auto;
-            min-width: 60px;
+            width: 30px;
+            min-width: 30px;
+            min-height: 30px;
         }
         
         .info-panel-header {
@@ -233,85 +235,45 @@
         /* レスポンシブ対応 */
         @media (max-width: 768px) {
             .location-panel {
-                width: calc(100vw - 30px);
-                max-width: none;
-                left: 15px;
-                right: 15px;
-                top: 70px;
                 position: fixed;
+                top: 10px;
+                left: 70px;
+                width: calc(100vw - 110px);
+                max-width: none;
             }
             
             .info-panel {
                 position: fixed;
-                width: calc(100vw - 30px);
+                top: 110px;
+                width: calc(100vw - 45px);
                 max-width: none;
-                left: 15px;
-                right: 15px;
-                top: 240px;
+                left: 12px;
+                right: 12px;
             }
             
             .info-panel.collapsed {
-                width: 60px;
-                right: 15px;
+                top: 110px;
+                right: 12px;
+                width: 30px;
                 left: auto;
             }
             
+            body.info-collapsed .location-panel {
+                width: calc(100vw - 110px);
+                right: 12px;
+            }
+            
             #map {
-                padding-top: 380px;
-                height: calc(100vh - 380px);
+                padding-top: 400px;
+                height: calc(100vh - 400px);
             }
             
             body.info-collapsed #map {
-                padding-top: 260px;
-                height: calc(100vh - 260px);
+                padding-top: 120px;
+                height: calc(100vh - 120px);
             }
         }
         
-        @media (max-width: 480px) {
-            .location-panel {
-                padding: 10px;
-                max-height: 120px;
-                left: 10px;
-                right: 10px;
-                width: calc(100vw - 20px);
-            }
-            
-            .info-panel {
-                padding: 10px;
-                top: 210px;
-                left: 10px;
-                right: 10px;
-                width: calc(100vw - 20px);
-            }
-            
-            .info-panel.collapsed {
-                padding: 8px;
-                right: 10px;
-            }
-            
-            #map {
-                padding-top: 340px;
-                height: calc(100vh - 340px);
-            }
-            
-            body.info-collapsed #map {
-                padding-top: 230px;
-                height: calc(100vh - 230px);
-            }
-            
-            .location-header h3 {
-                font-size: 14px;
-            }
-            
-            .location-toggle {
-                font-size: 11px;
-                padding: 4px 8px;
-            }
-            
-            .info-panel-header h3 {
-                font-size: 16px;
-            }
-        }
     </style>
 </head>
 <body>
@@ -324,7 +286,7 @@
     <div class="location-panel" id="locationPanel" style="display: none;">
         <div class="location-header">
             <h3>📍 現在位置</h3>
-            <button class="location-toggle" id="locationToggle" onclick="toggleLocationTracking()">
+            <button class="location-toggle disabled" id="locationToggle" onclick="toggleLocationTracking()">
                 位置追従 OFF
             </button>
         </div>
