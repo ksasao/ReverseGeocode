@@ -28,7 +28,7 @@
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-            max-height: 150px;
+            max-height: 200px;
             overflow: hidden;
             -webkit-transform: translateZ(0);
             transform: translateZ(0);
@@ -45,6 +45,11 @@
             margin: 0;
             color: #333;
             font-size: 16px;
+        }
+        
+        .location-controls {
+            display: flex;
+            gap: 8px;
         }
         
         .location-toggle {
@@ -71,6 +76,25 @@
             background: #888;
         }
         
+        .prediction-toggle {
+            background: #2196F3;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.3s;
+        }
+        
+        .prediction-toggle:hover {
+            background: #1976D2;
+        }
+        
+        .prediction-toggle.disabled {
+            background: #999;
+        }
+        
         .current-address {
             font-size: 14px;
             line-height: 1.5;
@@ -91,6 +115,13 @@
         .current-address .coords {
             color: #999;
             font-size: 11px;
+        }
+        
+        .current-address .prediction-info {
+            color: #2196F3;
+            font-size: 11px;
+            font-style: italic;
+            margin-top: 3px;
         }
         
         .location-status {
@@ -244,7 +275,7 @@
             
             .info-panel {
                 position: fixed;
-                top: 110px;
+                top: 150px;
                 width: calc(100vw - 45px);
                 max-width: none;
                 left: 12px;
@@ -252,7 +283,7 @@
             }
             
             .info-panel.collapsed {
-                top: 110px;
+                top: 150px;
                 right: 12px;
                 width: 30px;
                 left: auto;
@@ -264,13 +295,13 @@
             }
             
             #map {
-                padding-top: 400px;
-                height: calc(100vh - 400px);
+                padding-top: 450px;
+                height: calc(100vh - 450px);
             }
             
             body.info-collapsed #map {
-                padding-top: 120px;
-                height: calc(100vh - 120px);
+                padding-top: 170px;
+                height: calc(100vh - 170px);
             }
         }
         
@@ -286,9 +317,14 @@
     <div class="location-panel" id="locationPanel" style="display: none;">
         <div class="location-header">
             <h3>📍 現在位置</h3>
-            <button class="location-toggle disabled" id="locationToggle" onclick="toggleLocationTracking()">
-                位置追従 OFF
-            </button>
+            <div class="location-controls">
+                <button class="prediction-toggle disabled" id="predictionToggle" onclick="togglePrediction()">
+                    予測 OFF
+                </button>
+                <button class="location-toggle disabled" id="locationToggle" onclick="toggleLocationTracking()">
+                    位置追従 OFF
+                </button>
+            </div>
         </div>
         <div id="locationContent">
             <div class="location-status">位置情報を取得中...</div>
@@ -303,12 +339,14 @@
         <div class="info-panel-content">
             <p>地図上をクリックすると、その場所の住所が表示されます。</p>
             <p>位置追従をONにすると、現在位置の住所を常時表示します。</p>
+            <p>予測機能をONにすると、過去の移動履歴から位置を予測して滑らかに更新されます。</p>
             <p>データはデジタル庁のレジストリカタログのデータを加工して利用しています[<a href="https://github.com/ksasao/ReverseGeocode/">詳細</a>]</p>
             <p class="search-radius">※ クリック地点から 5km 以内の最寄り住所を検索</p>
             <div class="performance-info" id="performance" style="display: none;">
                 <div>データ件数: <span id="dataCount">-</span>件</div>
                 <div>kd木構築時間: <span id="buildTime">-</span>ms</div>
                 <div>検索時間: <span id="searchTime">-</span>ms</div>
+                <div>予測更新頻度: <span id="predictionRate">-</span>Hz</div>
             </div>
         </div>
     </div>
@@ -324,6 +362,20 @@
         let currentLocationMarker = null;
         let watchId = null;
         let followingLocation = false;
+        
+        // 位置予測機能の変数
+        let predictionEnabled = false;
+        let locationHistory = [];
+        let predictionTimer = null;
+        let lastKnownPosition = null;
+        let lastUpdateTime = null;
+        let currentPredictedPosition = null;
+        
+        // 予測の設定
+        const PREDICTION_HISTORY_SIZE = 5; // 履歴保持数
+        const PREDICTION_UPDATE_INTERVAL = 100; // 100ms = 10Hz
+        const MAX_PREDICTION_TIME = 5000; // 最大5秒間予測
+        const MIN_SPEED_THRESHOLD = 0.5; // 最低移動速度 (m/s)
         
         // kd木のノード
         class KDNode {
@@ -434,11 +486,6 @@
                     followingLocation = false;
                     console.log('手動移動により位置追従を一時停止');
                 }
-            });
-            
-            // ズーム時は位置追従を維持
-            map.on('zoomstart', function() {
-                // ズーム操作では位置追従を維持
             });
         }
         
@@ -578,6 +625,111 @@
             return kana;
         }
         
+        // 位置の予測を計算
+        function predictPosition() {
+            if (locationHistory.length < 2) return null;
+            
+            const now = Date.now();
+            const timeSinceLastUpdate = now - lastUpdateTime;
+            
+            // 最大予測時間を超えた場合は予測を停止
+            if (timeSinceLastUpdate > MAX_PREDICTION_TIME) {
+                return null;
+            }
+            
+            // 直近の2点から速度を計算
+            const recent = locationHistory.slice(-2);
+            const timeDiff = recent[1].timestamp - recent[0].timestamp;
+            
+            if (timeDiff <= 0) return null;
+            
+            const latDiff = recent[1].lat - recent[0].lat;
+            const lonDiff = recent[1].lon - recent[0].lon;
+            
+            // 移動距離を計算
+            const distance = kdTree.calculateDistance(recent[0].lat, recent[0].lon, recent[1].lat, recent[1].lon);
+            const speed = distance / (timeDiff / 1000); // m/s
+            
+            // 移動速度が閾値以下の場合でも予測位置は計算（表示更新の判定は別で行う）
+            
+            // 時間あたりの変化率を計算
+            const latRate = latDiff / timeDiff; // 度/ms
+            const lonRate = lonDiff / timeDiff; // 度/ms
+            
+            // 現在時刻での予測位置を計算
+            const predictedLat = recent[1].lat + latRate * timeSinceLastUpdate;
+            const predictedLon = recent[1].lon + lonRate * timeSinceLastUpdate;
+            
+            return {
+                lat: predictedLat,
+                lon: predictedLon,
+                speed: speed,
+                timeSinceUpdate: timeSinceLastUpdate
+            };
+        }
+        
+        // 予測位置の更新
+        function updatePredictedLocation() {
+            if (!predictionEnabled || !locationTracking) return;
+            
+            const predicted = predictPosition();
+            if (predicted) {
+                currentPredictedPosition = predicted;
+                
+                // 位置追従中は地図の中心を予測位置に移動
+                if (followingLocation) {
+                    map.setView([predicted.lat, predicted.lon], map.getZoom(), { animate: false });
+                }
+                
+                // マーカーを更新
+                updateLocationMarker(predicted.lat, predicted.lon, true);
+                
+                // 移動速度が一定以上の場合のみ住所表示を更新（ちらつき防止）
+                if (predicted.speed > 1.0) { // 1.0m/s以上で移動中の場合のみ更新
+                    updateAddressDisplay(predicted.lat, predicted.lon, true, predicted);
+                } else {
+                    // 停止中は座標情報のみを更新
+                    updateCoordinatesOnly(predicted.lat, predicted.lon, true, predicted);
+                }
+            }
+        }
+        
+        // 予測機能の開始
+        function startPrediction() {
+            predictionEnabled = true;
+            document.getElementById('predictionToggle').textContent = '予測 ON';
+            document.getElementById('predictionToggle').classList.remove('disabled');
+            document.getElementById('predictionRate').textContent = (1000 / PREDICTION_UPDATE_INTERVAL).toFixed(1);
+            
+            predictionTimer = setInterval(updatePredictedLocation, PREDICTION_UPDATE_INTERVAL);
+            console.log('位置予測機能を開始しました');
+        }
+        
+        // 予測機能の停止
+        function stopPrediction() {
+            predictionEnabled = false;
+            document.getElementById('predictionToggle').textContent = '予測 OFF';
+            document.getElementById('predictionToggle').classList.add('disabled');
+            document.getElementById('predictionRate').textContent = '-';
+            
+            if (predictionTimer) {
+                clearInterval(predictionTimer);
+                predictionTimer = null;
+            }
+            
+            currentPredictedPosition = null;
+            console.log('位置予測機能を停止しました');
+        }
+        
+        // 予測機能の切り替え
+        function togglePrediction() {
+            if (predictionEnabled) {
+                stopPrediction();
+            } else {
+                startPrediction();
+            }
+        }
+        
         // 位置追従開始
         function startLocationTracking() {
             if (!navigator.geolocation) {
@@ -592,11 +744,17 @@
             toggleBtn.textContent = '位置追従 ON';
             toggleBtn.classList.remove('disabled');
             
+            // 履歴をリセット
+            locationHistory = [];
+            lastKnownPosition = null;
+            lastUpdateTime = null;
+            currentPredictedPosition = null;
+            
             // iOSでより良い位置精度を得るための設定
             const options = {
                 enableHighAccuracy: true,
                 timeout: 15000,
-                maximumAge: 30000 // 30秒間キャッシュ
+                maximumAge: 10000 // 10秒間キャッシュ
             };
             
             document.getElementById('locationContent').innerHTML = 
@@ -643,6 +801,9 @@
             document.getElementById('locationToggle').textContent = '位置追従 OFF';
             document.getElementById('locationToggle').classList.add('disabled');
             
+            // 予測機能も停止
+            stopPrediction();
+            
             if (watchId !== null) {
                 navigator.geolocation.clearWatch(watchId);
                 watchId = null;
@@ -652,6 +813,12 @@
                 map.removeLayer(currentLocationMarker);
                 currentLocationMarker = null;
             }
+            
+            // 履歴をクリア
+            locationHistory = [];
+            lastKnownPosition = null;
+            lastUpdateTime = null;
+            currentPredictedPosition = null;
             
             document.getElementById('locationContent').innerHTML = 
                 '<div class="location-status">位置追従が停止されています</div>';
@@ -666,27 +833,19 @@
             }
         }
         
-        // 現在位置を更新
-        function updateCurrentLocation(position) {
-            const lat = position.coords.latitude;
-            const lng = position.coords.longitude;
-            const accuracy = position.coords.accuracy;
-            
-            console.log('現在位置:', lat, lng, '精度:', accuracy + 'm');
-            
-            // 位置追従中は地図の中心を現在位置に移動
-            if (followingLocation) {
-                map.setView([lat, lng], map.getZoom(), { animate: true });
-            }
-            
-            // 現在位置のマーカーを更新
+        // マーカーの更新
+        function updateLocationMarker(lat, lng, isPredicted = false) {
             if (currentLocationMarker) {
                 map.removeLayer(currentLocationMarker);
             }
             
+            const iconUrl = isPredicted ? 
+                'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-violet.png' :
+                'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png';
+            
             currentLocationMarker = L.marker([lat, lng], {
                 icon: L.icon({
-                    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+                    iconUrl: iconUrl,
                     shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
                     iconSize: [25, 41],
                     iconAnchor: [12, 41],
@@ -694,37 +853,174 @@
                     shadowSize: [41, 41]
                 })
             }).addTo(map);
+        }
+        
+        // 予測モード時のGPS更新用住所表示
+        function updateAddressDisplayWithPredictionMode(lat, lng, accuracy) {
+            if (!kdTree) return;
             
-            // 住所を検索
-            if (kdTree) {
-                const startTime = performance.now();
-                const nearest = kdTree.findNearest(lat, lng);
-                const endTime = performance.now();
-                const searchTime = Math.round((endTime - startTime) * 1000) / 1000;
+            const startTime = performance.now();
+            const nearest = kdTree.findNearest(lat, lng);
+            const endTime = performance.now();
+            const searchTime = Math.round((endTime - startTime) * 1000) / 1000;
+            
+            document.getElementById('searchTime').textContent = searchTime;
+            
+            if (nearest) {
+                const address = buildAddressString(nearest);
+                const kana = buildAddressKanaString(nearest);
                 
-                document.getElementById('searchTime').textContent = searchTime;
-                
-                if (nearest) {
-                    const address = buildAddressString(nearest);
-                    const kana = buildAddressKanaString(nearest);
-                    
-                    const content = `
-                        <div class="current-address">
-                            <div class="address">${address}</div>
-                            <div class="kana">${kana}</div>
-                            <div class="coords">
-                                現在位置: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
-                                住所地点: ${nearest.lat.toFixed(6)}, ${nearest.lon.toFixed(6)}<br>
-                                距離: ${nearest.distance.toFixed(0)}m | 精度: ${accuracy.toFixed(0)}m
-                            </div>
+                let content = `
+                    <div class="current-address">
+                        <div class="address">${address}</div>
+                        <div class="kana">${kana}</div>
+                        <div class="coords">
+                            予測位置: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                            住所地点: ${nearest.lat.toFixed(6)}, ${nearest.lon.toFixed(6)}<br>
+                            距離: ${nearest.distance.toFixed(0)}m<br>
+                            GPS精度: ${accuracy.toFixed(0)}m
                         </div>
+                        <div class="prediction-info">🔮 予測による位置表示</div>
+                    </div>
+                `;
+                
+                document.getElementById('locationContent').innerHTML = content;
+            } else {
+                document.getElementById('locationContent').innerHTML = 
+                    '<div class="location-status">予測位置の近くに住所データが見つかりません</div>';
+            }
+        }
+        
+        // 座標情報のみを更新（住所検索なし）
+        function updateCoordinatesOnly(lat, lng, isPredicted = false, predictionInfo = null) {
+            // 既存の住所情報を保持したまま座標部分のみを更新
+            const locationContent = document.getElementById('locationContent');
+            const addressDiv = locationContent.querySelector('.current-address');
+            
+            if (addressDiv) {
+                const coordsDiv = addressDiv.querySelector('.coords');
+                if (coordsDiv) {
+                    let coordsText = `
+                        ${isPredicted ? '予測位置' : '現在位置'}: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
                     `;
                     
-                    document.getElementById('locationContent').innerHTML = content;
-                } else {
-                    document.getElementById('locationContent').innerHTML = 
-                        '<div class="location-status">近くに住所データが見つかりません</div>';
+                    // 既存の住所地点情報を保持
+                    const existingText = coordsDiv.innerHTML;
+                    const addressPointMatch = existingText.match(/住所地点: ([^<]+)<br>/);
+                    const distanceMatch = existingText.match(/距離: ([^<]+)<br>/);
+                    
+                    if (addressPointMatch && distanceMatch) {
+                        coordsText += `住所地点: ${addressPointMatch[1]}<br>`;
+                        coordsText += `距離: ${distanceMatch[1]}<br>`;
+                    }
+                    
+                    if (isPredicted && predictionInfo) {
+                        coordsText += `移動速度: ${predictionInfo.speed.toFixed(1)}m/s<br>`;
+                        coordsText += `更新から: ${(predictionInfo.timeSinceUpdate / 1000).toFixed(1)}秒`;
+                    }
+                    
+                    coordsDiv.innerHTML = coordsText;
                 }
+                
+                // 予測表示の更新
+                let predictionDiv = addressDiv.querySelector('.prediction-info');
+                if (isPredicted) {
+                    if (!predictionDiv) {
+                        predictionDiv = document.createElement('div');
+                        predictionDiv.className = 'prediction-info';
+                        addressDiv.appendChild(predictionDiv);
+                    }
+                    predictionDiv.textContent = '🔮 予測による位置表示';
+                } else if (predictionDiv) {
+                    predictionDiv.remove();
+                }
+            }
+        }
+        
+        // 住所表示の更新
+        function updateAddressDisplay(lat, lng, isPredicted = false, predictionInfo = null) {
+            if (!kdTree) return;
+            
+            const startTime = performance.now();
+            const nearest = kdTree.findNearest(lat, lng);
+            const endTime = performance.now();
+            const searchTime = Math.round((endTime - startTime) * 1000) / 1000;
+            
+            document.getElementById('searchTime').textContent = searchTime;
+            
+            if (nearest) {
+                const address = buildAddressString(nearest);
+                const kana = buildAddressKanaString(nearest);
+                
+                let content = `
+                    <div class="current-address">
+                        <div class="address">${address}</div>
+                        <div class="kana">${kana}</div>
+                        <div class="coords">
+                            ${isPredicted ? '予測位置' : '現在位置'}: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                            住所地点: ${nearest.lat.toFixed(6)}, ${nearest.lon.toFixed(6)}<br>
+                            距離: ${nearest.distance.toFixed(0)}m
+                `;
+                
+                if (isPredicted && predictionInfo) {
+                    content += `<br>移動速度: ${predictionInfo.speed.toFixed(1)}m/s`;
+                    content += `<br>更新から: ${(predictionInfo.timeSinceUpdate / 1000).toFixed(1)}秒`;
+                }
+                
+                content += `
+                        </div>
+                `;
+                
+                if (isPredicted) {
+                    content += `<div class="prediction-info">🔮 予測による位置表示</div>`;
+                }
+                
+                content += `</div>`;
+                
+                document.getElementById('locationContent').innerHTML = content;
+            } else {
+                const statusText = isPredicted ? '予測位置の近くに住所データが見つかりません' : '近くに住所データが見つかりません';
+                document.getElementById('locationContent').innerHTML = 
+                    `<div class="location-status">${statusText}</div>`;
+            }
+        }
+        
+        // 現在位置を更新
+        function updateCurrentLocation(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            const accuracy = position.coords.accuracy;
+            const timestamp = Date.now();
+            
+            console.log('現在位置:', lat, lng, '精度:', accuracy + 'm');
+            
+            // 履歴に追加
+            const locationPoint = { lat, lon: lng, timestamp, accuracy };
+            locationHistory.push(locationPoint);
+            
+            // 履歴サイズを制限
+            if (locationHistory.length > PREDICTION_HISTORY_SIZE) {
+                locationHistory.shift();
+            }
+            
+            lastKnownPosition = locationPoint;
+            lastUpdateTime = timestamp;
+            
+            // 位置追従中は地図の中心を現在位置に移動
+            if (followingLocation) {
+                map.setView([lat, lng], map.getZoom(), { animate: true });
+            }
+            
+            // マーカーを更新（実際の位置なので予測フラグはfalse）
+            updateLocationMarker(lat, lng, false);
+            
+            // 予測機能がONの場合は予測表示を維持、OFFの場合のみ通常表示
+            if (predictionEnabled) {
+                // 予測機能ON時は住所情報を更新するが予測表示は維持
+                updateAddressDisplayWithPredictionMode(lat, lng, accuracy);
+            } else {
+                // 予測機能OFF時は通常の表示
+                updateAddressDisplay(lat, lng, false);
             }
         }
         

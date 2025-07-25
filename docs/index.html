@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>日本住所検索マップ（改良版）</title>
+    <title>日本住所検索マップ</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body {
@@ -650,10 +650,7 @@
             const distance = kdTree.calculateDistance(recent[0].lat, recent[0].lon, recent[1].lat, recent[1].lon);
             const speed = distance / (timeDiff / 1000); // m/s
             
-            // 移動速度が閾値以下の場合は予測しない
-            if (speed < MIN_SPEED_THRESHOLD) {
-                return null;
-            }
+            // 移動速度が閾値以下の場合でも予測位置は計算（表示更新の判定は別で行う）
             
             // 時間あたりの変化率を計算
             const latRate = latDiff / timeDiff; // 度/ms
@@ -687,8 +684,13 @@
                 // マーカーを更新
                 updateLocationMarker(predicted.lat, predicted.lon, true);
                 
-                // 住所を検索して表示を更新
-                updateAddressDisplay(predicted.lat, predicted.lon, true, predicted);
+                // 移動速度が一定以上の場合のみ住所表示を更新（ちらつき防止）
+                if (predicted.speed > 1.0) { // 1.0m/s以上で移動中の場合のみ更新
+                    updateAddressDisplay(predicted.lat, predicted.lon, true, predicted);
+                } else {
+                    // 停止中は座標情報のみを更新
+                    updateCoordinatesOnly(predicted.lat, predicted.lon, true, predicted);
+                }
             }
         }
         
@@ -853,6 +855,88 @@
             }).addTo(map);
         }
         
+        // 予測モード時のGPS更新用住所表示
+        function updateAddressDisplayWithPredictionMode(lat, lng, accuracy) {
+            if (!kdTree) return;
+            
+            const startTime = performance.now();
+            const nearest = kdTree.findNearest(lat, lng);
+            const endTime = performance.now();
+            const searchTime = Math.round((endTime - startTime) * 1000) / 1000;
+            
+            document.getElementById('searchTime').textContent = searchTime;
+            
+            if (nearest) {
+                const address = buildAddressString(nearest);
+                const kana = buildAddressKanaString(nearest);
+                
+                let content = `
+                    <div class="current-address">
+                        <div class="address">${address}</div>
+                        <div class="kana">${kana}</div>
+                        <div class="coords">
+                            予測位置: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                            住所地点: ${nearest.lat.toFixed(6)}, ${nearest.lon.toFixed(6)}<br>
+                            距離: ${nearest.distance.toFixed(0)}m<br>
+                            GPS精度: ${accuracy.toFixed(0)}m
+                        </div>
+                        <div class="prediction-info">🔮 予測による位置表示</div>
+                    </div>
+                `;
+                
+                document.getElementById('locationContent').innerHTML = content;
+            } else {
+                document.getElementById('locationContent').innerHTML = 
+                    '<div class="location-status">予測位置の近くに住所データが見つかりません</div>';
+            }
+        }
+        
+        // 座標情報のみを更新（住所検索なし）
+        function updateCoordinatesOnly(lat, lng, isPredicted = false, predictionInfo = null) {
+            // 既存の住所情報を保持したまま座標部分のみを更新
+            const locationContent = document.getElementById('locationContent');
+            const addressDiv = locationContent.querySelector('.current-address');
+            
+            if (addressDiv) {
+                const coordsDiv = addressDiv.querySelector('.coords');
+                if (coordsDiv) {
+                    let coordsText = `
+                        ${isPredicted ? '予測位置' : '現在位置'}: ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                    `;
+                    
+                    // 既存の住所地点情報を保持
+                    const existingText = coordsDiv.innerHTML;
+                    const addressPointMatch = existingText.match(/住所地点: ([^<]+)<br>/);
+                    const distanceMatch = existingText.match(/距離: ([^<]+)<br>/);
+                    
+                    if (addressPointMatch && distanceMatch) {
+                        coordsText += `住所地点: ${addressPointMatch[1]}<br>`;
+                        coordsText += `距離: ${distanceMatch[1]}<br>`;
+                    }
+                    
+                    if (isPredicted && predictionInfo) {
+                        coordsText += `移動速度: ${predictionInfo.speed.toFixed(1)}m/s<br>`;
+                        coordsText += `更新から: ${(predictionInfo.timeSinceUpdate / 1000).toFixed(1)}秒`;
+                    }
+                    
+                    coordsDiv.innerHTML = coordsText;
+                }
+                
+                // 予測表示の更新
+                let predictionDiv = addressDiv.querySelector('.prediction-info');
+                if (isPredicted) {
+                    if (!predictionDiv) {
+                        predictionDiv = document.createElement('div');
+                        predictionDiv.className = 'prediction-info';
+                        addressDiv.appendChild(predictionDiv);
+                    }
+                    predictionDiv.textContent = '🔮 予測による位置表示';
+                } else if (predictionDiv) {
+                    predictionDiv.remove();
+                }
+            }
+        }
+        
         // 住所表示の更新
         function updateAddressDisplay(lat, lng, isPredicted = false, predictionInfo = null) {
             if (!kdTree) return;
@@ -930,8 +1014,14 @@
             // マーカーを更新（実際の位置なので予測フラグはfalse）
             updateLocationMarker(lat, lng, false);
             
-            // 住所を検索して表示
-            updateAddressDisplay(lat, lng, false);
+            // 予測機能がONの場合は予測表示を維持、OFFの場合のみ通常表示
+            if (predictionEnabled) {
+                // 予測機能ON時は住所情報を更新するが予測表示は維持
+                updateAddressDisplayWithPredictionMode(lat, lng, accuracy);
+            } else {
+                // 予測機能OFF時は通常の表示
+                updateAddressDisplay(lat, lng, false);
+            }
         }
         
         // 位置情報エラー処理
