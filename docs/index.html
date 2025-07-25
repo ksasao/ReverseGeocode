@@ -19,7 +19,7 @@
         /* 現在位置表示パネル */
         .location-panel {
             position: fixed;
-            top: 10px;
+            top: 70px;
             left: 10px;
             width: calc(100vw - 360px);
             max-width: 500px;
@@ -112,8 +112,8 @@
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-            width: 320px;
-            max-width: calc(100vw - 20px);
+            width: 300px;
+            max-width: calc(100vw - 30px);
             -webkit-transform: translateZ(0);
             transform: translateZ(0);
             transition: all 0.3s ease;
@@ -233,37 +233,37 @@
         /* レスポンシブ対応 */
         @media (max-width: 768px) {
             .location-panel {
-                width: calc(100vw - 20px);
+                width: calc(100vw - 30px);
                 max-width: none;
-                left: 10px;
-                right: 10px;
-                top: 10px;
+                left: 15px;
+                right: 15px;
+                top: 70px;
                 position: fixed;
             }
             
             .info-panel {
                 position: fixed;
-                width: calc(100vw - 20px);
+                width: calc(100vw - 30px);
                 max-width: none;
-                left: 10px;
-                right: 10px;
-                top: 180px;
+                left: 15px;
+                right: 15px;
+                top: 240px;
             }
             
             .info-panel.collapsed {
                 width: 60px;
-                right: 10px;
+                right: 15px;
                 left: auto;
             }
             
             #map {
-                padding-top: 320px;
-                height: calc(100vh - 320px);
+                padding-top: 380px;
+                height: calc(100vh - 380px);
             }
             
             body.info-collapsed #map {
-                padding-top: 200px;
-                height: calc(100vh - 200px);
+                padding-top: 260px;
+                height: calc(100vh - 260px);
             }
         }
         
@@ -271,25 +271,32 @@
             .location-panel {
                 padding: 10px;
                 max-height: 120px;
+                left: 10px;
+                right: 10px;
+                width: calc(100vw - 20px);
             }
             
             .info-panel {
                 padding: 10px;
-                top: 150px;
+                top: 210px;
+                left: 10px;
+                right: 10px;
+                width: calc(100vw - 20px);
             }
             
             .info-panel.collapsed {
                 padding: 8px;
+                right: 10px;
             }
             
             #map {
-                padding-top: 280px;
-                height: calc(100vh - 280px);
+                padding-top: 340px;
+                height: calc(100vh - 340px);
             }
             
             body.info-collapsed #map {
-                padding-top: 170px;
-                height: calc(100vh - 170px);
+                padding-top: 230px;
+                height: calc(100vh - 230px);
             }
             
             .location-header h3 {
@@ -318,7 +325,7 @@
         <div class="location-header">
             <h3>📍 現在位置</h3>
             <button class="location-toggle" id="locationToggle" onclick="toggleLocationTracking()">
-                位置追従 ON
+                位置追従 OFF
             </button>
         </div>
         <div id="locationContent">
@@ -334,7 +341,6 @@
         <div class="info-panel-content">
             <p>地図上をクリックすると、その場所の住所が表示されます。</p>
             <p>位置追従をONにすると、現在位置の住所を常時表示します。</p>
-            <p><strong>※ HTTPS環境が必要:</strong> 位置情報機能はHTTPS（またはlocalhost）でのみ動作します。GitHub Pages等にアップロードしてお試しください。</p>
             <p>データはデジタル庁のレジストリカタログのデータを加工して利用しています[<a href="https://github.com/ksasao/ReverseGeocode/">詳細</a>]</p>
             <p class="search-radius">※ クリック地点から 5km 以内の最寄り住所を検索</p>
             <div class="performance-info" id="performance" style="display: none;">
@@ -355,6 +361,7 @@
         let locationTracking = false;
         let currentLocationMarker = null;
         let watchId = null;
+        let followingLocation = false;
         
         // kd木のノード
         class KDNode {
@@ -458,6 +465,19 @@
             
             // 地図クリックイベント
             map.on('click', onMapClick);
+            
+            // 地図移動時に位置追従を無効化
+            map.on('dragstart', function() {
+                if (followingLocation) {
+                    followingLocation = false;
+                    console.log('手動移動により位置追従を一時停止');
+                }
+            });
+            
+            // ズーム時は位置追従を維持
+            map.on('zoomstart', function() {
+                // ズーム操作では位置追従を維持
+            });
         }
         
         // CSVデータを読み込み
@@ -480,17 +500,16 @@
                 
                 document.getElementById('loading').style.display = 'none';
                 
-                // パネルを表示してから位置追従を開始
+                // パネルを表示（位置追従は初期状態でOFF）
                 const locationPanel = document.getElementById('locationPanel');
                 locationPanel.style.display = 'block';
                 
                 const performancePanel = document.getElementById('performance');
                 performancePanel.style.display = 'block';
                 
-                // 少し待ってから位置追従を開始（レイアウトが安定してから）
-                setTimeout(() => {
-                    startLocationTracking();
-                }, 500);
+                // 初期状態では位置追従をOFFに設定
+                document.getElementById('locationContent').innerHTML = 
+                    '<div class="location-status">位置追従をONにすると現在位置を表示します</div>';
                 
             } catch (error) {
                 console.error('CSVファイルの読み込みに失敗しました:', error);
@@ -605,14 +624,8 @@
                 return;
             }
             
-            // HTTPSチェック
-            if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-                document.getElementById('locationContent').innerHTML = 
-                    '<div class="location-error">位置情報はHTTPS環境でのみ利用できます<br>GitHub Pages等にアップロードしてお試しください</div>';
-                return;
-            }
-            
             locationTracking = true;
+            followingLocation = true;
             const toggleBtn = document.getElementById('locationToggle');
             toggleBtn.textContent = '位置追従 ON';
             toggleBtn.classList.remove('disabled');
@@ -664,6 +677,7 @@
         // 位置追従停止
         function stopLocationTracking() {
             locationTracking = false;
+            followingLocation = false;
             document.getElementById('locationToggle').textContent = '位置追従 OFF';
             document.getElementById('locationToggle').classList.add('disabled');
             
@@ -697,6 +711,11 @@
             const accuracy = position.coords.accuracy;
             
             console.log('現在位置:', lat, lng, '精度:', accuracy + 'm');
+            
+            // 位置追従中は地図の中心を現在位置に移動
+            if (followingLocation) {
+                map.setView([lat, lng], map.getZoom(), { animate: true });
+            }
             
             // 現在位置のマーカーを更新
             if (currentLocationMarker) {
